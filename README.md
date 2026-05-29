@@ -1,16 +1,21 @@
 # telemetryd
 
-`telemetryd` is an asynchronous SNMP polling daemon for collecting printer counters and computing rate‑based metrics. It polls multiple devices concurrently and reports raw values and computed rates.
+`telemetryd` is an asynchronous SNMP polling daemon for collecting printer counters and computing rate‑based metrics. It polls multiple devices concurrently, handles counter wraparound, and emits both raw values and computed per‑second rates.
 
 ---
 
-## Purpose
+## Overview
 
-- Poll SNMP counters from network printers  
-- Track monotonic counters per device and OID  
-- Handle COUNTER32 and COUNTER64 wraparound  
-- Compute per‑second rates from deltas  
-- Emit values and rates through a reporter interface  
+`telemetryd` is designed for environments where printers expose monotonic counters via SNMP. The daemon:
+
+- polls multiple devices concurrently  
+- computes deltas and per‑second rates  
+- handles COUNTER32/COUNTER64 wraparound  
+- applies per‑device staggering to avoid synchronized bursts  
+- enforces per‑device timeouts  
+- maintains a stable polling interval using drift compensation  
+
+The system is fully asynchronous and testable, with deterministic behavior when an RNG is injected.
 
 ---
 
@@ -22,45 +27,77 @@ Editable install:
 pip install -e .
 ```
 
-Test dependencies:
+Install test dependencies:
 
 ```
 pip install .[test]
 ```
 
+Run tests:
+
+```
+pytest
+```
+
 ---
 
-## Components
+## Architecture
 
 ### **1. Scheduler**
-Runs the main loop.  
-Loads configuration, dispatches polling tasks, tracks drift, and maintains a stable interval.  
-Supports graceful shutdown and single‑iteration execution.
+Coordinates the entire polling cycle.
+
+- Loads configuration  
+- Applies per‑device random staggering  
+- Wraps each poll in a timeout  
+- Maintains a stable interval using drift compensation  
+- Supports graceful shutdown  
+- Can run a single iteration (`run_once`) for integration tests  
 
 ### **2. Async SNMP client**
-Simulates SNMP polling.  
-Uses an injected RNG for deterministic tests.  
-Implements latency, jitter spikes, timeouts, malformed responses, and partial metric sets.
+Simulates SNMP polling with:
+
+- configurable latency  
+- jitter spikes  
+- partial metric sets  
+- malformed responses  
+- deterministic behavior via injected RNG  
 
 ### **3. Rate calculator**
-Stores previous values, computes deltas, corrects wraparound, and returns per‑second rates.
+Tracks previous values per `(host, oid)` and computes:
+
+- deltas  
+- wraparound‑corrected deltas  
+- per‑second rates  
 
 ### **4. Reporter**
-Receives metric values and errors.  
-Separates output from scheduler logic.
+Receives:
+
+- initial counter values  
+- computed rates  
+- polling errors  
+- timeout errors  
+
+The reporter is intentionally decoupled from the scheduler.
 
 ### **5. Configuration**
-`config.json` defines devices, OIDs, SNMP types, and polling interval.
+`config.json` defines:
+
+- polling interval  
+- devices  
+- SNMP community  
+- OIDs and SNMP types  
 
 ### **6. Tests**
 Covers:
+
 - counter initialization  
 - monotonic increments  
-- COUNTER32 and COUNTER64 wraparound  
+- COUNTER32/COUNTER64 wraparound  
 - deterministic RNG behavior  
 - jitter and partial‑set stress  
-- scheduler integration with injected SNMP failures  
-- concurrency and timing behavior  
+- scheduler concurrency  
+- staggered startup behavior  
+- integration with simulated SNMP failures  
 
 ---
 
@@ -69,10 +106,7 @@ Covers:
 ```
 telemetryd/
 │
-├── .github/
-├── .gitignore
 ├── config.json
-├── LICENSE
 ├── main.py
 ├── pyproject.toml
 ├── README.md
@@ -108,14 +142,6 @@ telemetryd/
         {"oid": "1.3.6.1.2.1.43.10.2.1.4.1.1", "type": "COUNTER32", "name": "total_pages"},
         {"oid": "1.3.6.1.2.1.2.2.1.10.1", "type": "COUNTER64", "name": "if_in_octets"}
       ]
-    },
-    {
-      "host": "192.168.1.101",
-      "port": 161,
-      "community": "public",
-      "metrics": [
-        {"oid": "1.3.6.1.2.1.43.10.2.1.4.1.1", "type": "COUNTER32", "name": "total_pages"}
-      ]
     }
   ]
 }
@@ -123,16 +149,16 @@ telemetryd/
 
 ---
 
-## Running
-
-Start the daemon:
+## Running the daemon
 
 ```
 python main.py
 ```
 
-Run tests:
+The scheduler will:
 
-```
-pytest
-```
+- stagger initial polls  
+- poll all devices concurrently  
+- compute rates  
+- log metrics and errors  
+- maintain a stable interval  
