@@ -35,8 +35,7 @@ async def test_concurrency_stress(tmp_path):
     with patch.object(d.client, "fetch_metrics", side_effect=fake_fetch):
 
         async def run_once():
-            tasks = [d.poll_device(dev) for dev in cfg["devices"]]
-            await asyncio.gather(*tasks)
+            await d.run_once(cfg["devices"])
 
         t0 = time.time()
         await asyncio.gather(*(run_once() for _ in range(20)))

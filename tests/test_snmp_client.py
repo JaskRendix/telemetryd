@@ -1,4 +1,4 @@
-from unittest.mock import patch
+import random
 
 import pytest
 
@@ -69,9 +69,16 @@ async def test_independent_oids():
 
 @pytest.mark.asyncio
 async def test_forced_overflow_branch():
-    client = AsyncSNMPClient()
+    rng = random.Random()
+    rng.random = lambda: 0.99
+    rng.randint = lambda a, b: 50
+
+    client = AsyncSNMPClient(rng=rng)
     metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
-    with patch("random.random", return_value=0.99):
-        client._mock_accumulators["h:1"] = 100
-        r = await client.fetch_metrics("h", 161, "c", metrics)
-        assert r[0].value < 100
+
+    client._mock_accumulators["h:1"] = 100
+
+    r = await client.fetch_metrics("h", 161, "c", metrics)
+    v = r[0].value
+
+    assert v < 100

@@ -1,11 +1,10 @@
-import asyncio
 import json
 from unittest.mock import patch
 
 import pytest
 
 from telemetryd.metrics import SNMPResponse
-from telemetryd.scheduler import TelemetryDaemon
+from telemetryd.scheduler import TelemetryDaemon, TelemetryReporter
 
 
 @pytest.mark.asyncio
@@ -27,7 +26,9 @@ async def test_full_integration_poll_cycle(tmp_path):
 
     p = tmp_path / "cfg.json"
     p.write_text(json.dumps(cfg))
-    d = TelemetryDaemon(p)
+
+    reporter = TelemetryReporter()
+    d = TelemetryDaemon(p, reporter=reporter)
 
     seq = [
         [
@@ -40,17 +41,13 @@ async def test_full_integration_poll_cycle(tmp_path):
         ],
     ]
 
-    async def fake_fetch(host, port, community, metrics):
-        await asyncio.sleep(0)
+    async def fake_fetch(*args, **kwargs):
         return seq.pop(0)
 
     with patch.object(d.client, "fetch_metrics", side_effect=fake_fetch):
         with patch(
             "telemetryd.scheduler.time.time",
-            side_effect=[
-                100.0,  # first poll: current_time
-                102.0,  # second poll: current_time
-            ],
+            side_effect=[100.0, 102.0],
         ):
             await d.poll_device(cfg["devices"][0])
             await d.poll_device(cfg["devices"][0])
