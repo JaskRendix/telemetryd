@@ -56,6 +56,10 @@ class TelemetryDaemon:
         self._last_poll_time: dict[str, float] = {}
         self._shutdown_event: asyncio.Event = asyncio.Event()
 
+        self._stagger: dict[str, float] = {
+            d["host"]: self.client._rng.uniform(0, self.interval) for d in self.devices
+        }
+
     def _load_config(self, path: Path) -> ProgramConfig:
         with open(path, "r") as f:
             return json.load(f)
@@ -100,8 +104,36 @@ class TelemetryDaemon:
     async def start(self) -> None:
         self.reporter.startup(len(self.devices), self.interval)
 
+        # Staggered initial polls (non-blocking)
+        stagger_tasks = []
+        for device in self.devices:
+            host = device["host"]
+            offset = self._stagger[host]
+
+            async def delayed_poll(dev=device, delay=offset):
+                await asyncio.sleep(delay)
+                await self.poll_device(dev)
+
+            stagger_tasks.append(asyncio.create_task(delayed_poll()))
+
+        # Wait for staggered polls to finish
+        if stagger_tasks:
+            await asyncio.gather(*stagger_tasks)
+
+        # Main loop with drift compensation + timeout handling
         while not self._shutdown_event.is_set():
-            execution_duration = await self.run_once()
-            sleep_adjustment = max(0.0, self.interval - execution_duration)
+            start_ts = time.time()
+
+            # Timeout wrapper for each device
+            async def safe_poll(dev):
+                try:
+                    await asyncio.wait_for(self.poll_device(dev), timeout=self.interval)
+                except asyncio.TimeoutError:
+                    self.reporter.error(dev["host"], TimeoutError("poll timeout"))
+
+            await asyncio.gather(*(safe_poll(d) for d in self.devices))
+
+            elapsed = time.time() - start_ts
+            sleep_adjustment = max(0.0, self.interval - elapsed)
             if sleep_adjustment > 0:
                 await asyncio.sleep(sleep_adjustment)
