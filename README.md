@@ -1,21 +1,20 @@
 # telemetryd
 
-`telemetryd` is an asynchronous SNMP polling daemon for collecting printer counters and computing rate‑based metrics. It polls multiple devices concurrently, handles counter wraparound, and emits both raw values and computed per‑second rates.
+`telemetryd` is an asynchronous SNMP polling daemon for collecting printer counters and computing rate‑based metrics. It polls devices concurrently, handles counter wraparound, and emits raw values and computed rates.
 
 ---
 
 ## Overview
 
-`telemetryd` is designed for environments where printers expose monotonic counters via SNMP. The daemon:
+The daemon targets printers and other SNMP‑exposed devices that publish monotonic counters. It:
 
-- polls multiple devices concurrently  
+- polls devices concurrently  
 - computes deltas and per‑second rates  
-- handles COUNTER32/COUNTER64 wraparound  
-- applies per‑device staggering to avoid synchronized bursts  
+- handles COUNTER32 and COUNTER64 wraparound  
+- staggers initial polls  
 - enforces per‑device timeouts  
-- maintains a stable polling interval using drift compensation  
-
-The system is fully asynchronous and testable, with deterministic behavior when an RNG is injected.
+- maintains a stable polling interval through drift compensation  
+- supports deterministic behavior when an RNG is injected  
 
 ---
 
@@ -43,43 +42,43 @@ pytest
 
 ## Architecture
 
-### **1. Scheduler**
-Coordinates the entire polling cycle.
+### 1. Scheduler
+Runs the polling loop.
 
-- Loads configuration  
-- Applies per‑device random staggering  
-- Wraps each poll in a timeout  
-- Maintains a stable interval using drift compensation  
-- Supports graceful shutdown  
-- Can run a single iteration (`run_once`) for integration tests  
+- loads configuration  
+- applies per‑device staggering  
+- wraps each poll in a timeout  
+- maintains a fixed polling interval  
+- supports graceful shutdown  
+- exposes `run_once` for integration tests  
 
-### **2. Async SNMP client**
-Simulates SNMP polling with:
+### 2. Async SNMP client
+Simulates SNMP polling.
 
 - configurable latency  
 - jitter spikes  
 - partial metric sets  
 - malformed responses  
-- deterministic behavior via injected RNG  
+- deterministic behavior with injected RNG  
 
-### **3. Rate calculator**
-Tracks previous values per `(host, oid)` and computes:
+### 3. Rate calculator
+Computes per‑second rates.
 
-- deltas  
-- wraparound‑corrected deltas  
-- per‑second rates  
+- tracks previous values per `(host, oid)`  
+- handles wraparound  
+- enforces monotonicity  
+- supports GAUGE metrics  
+- uses LRU eviction to bound memory  
 
-### **4. Reporter**
+### 4. Reporter
 Receives:
 
-- initial counter values  
+- initial values  
 - computed rates  
 - polling errors  
 - timeout errors  
 
-The reporter is intentionally decoupled from the scheduler.
-
-### **5. Configuration**
+### 5. Configuration
 `config.json` defines:
 
 - polling interval  
@@ -87,17 +86,21 @@ The reporter is intentionally decoupled from the scheduler.
 - SNMP community  
 - OIDs and SNMP types  
 
-### **6. Tests**
+### 6. Tests
 Covers:
 
 - counter initialization  
 - monotonic increments  
-- COUNTER32/COUNTER64 wraparound  
+- wraparound  
+- gauge behavior  
+- LRU eviction  
 - deterministic RNG behavior  
-- jitter and partial‑set stress  
+- jitter and partial‑set handling  
 - scheduler concurrency  
-- staggered startup behavior  
+- staggering  
+- timeout handling  
 - integration with simulated SNMP failures  
+- chaos tests for scheduler, SNMP client, and rate calculator  
 
 ---
 
@@ -119,8 +122,10 @@ telemetryd/
 │       └── snmp.py
 │
 └── tests/
+    ├── test_chaos.py
     ├── test_daemon.py
     ├── test_daemon_concurrency.py
+    ├── test_daemon_staggering.py
     ├── test_integration_daemon.py
     ├── test_metrics.py
     └── test_snmp_client.py
@@ -155,10 +160,10 @@ telemetryd/
 python main.py
 ```
 
-The scheduler will:
+The scheduler:
 
-- stagger initial polls  
-- poll all devices concurrently  
-- compute rates  
-- log metrics and errors  
-- maintain a stable interval  
+- staggers initial polls  
+- polls devices concurrently  
+- computes rates  
+- logs metrics and errors  
+- maintains a fixed interval  

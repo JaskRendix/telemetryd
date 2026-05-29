@@ -83,3 +83,94 @@ def test_multiple_hosts_same_oid():
     rate2 = calc.calculate_rate("h2", r2b, delta_time=1.0)
     assert rate1 == 50.0
     assert rate2 == 30.0
+
+
+def test_gauge_returns_raw_value():
+    calc = RateCalculator()
+    resp1 = SNMPResponse(oid="g1", name="temp", value=42, snmp_type="GAUGE")
+    resp2 = SNMPResponse(oid="g1", name="temp", value=55, snmp_type="GAUGE")
+
+    # First poll returns raw value
+    assert calc.calculate_rate("h", resp1, delta_time=1.0) == 42.0
+
+    # Second poll returns raw value (no delta)
+    assert calc.calculate_rate("h", resp2, delta_time=1.0) == 55.0
+
+
+def test_negative_delta_non_counter_resets_to_zero():
+    calc = RateCalculator()
+    resp1 = SNMPResponse(oid="x", name="m", value=500, snmp_type="GAUGE")
+    resp2 = SNMPResponse(oid="x", name="m", value=100, snmp_type="GAUGE")
+
+    calc.calculate_rate("h", resp1, delta_time=1.0)
+    rate = calc.calculate_rate("h", resp2, delta_time=1.0)
+
+    # Gauges return raw value even if "negative delta"
+    assert rate == 100.0
+
+
+def test_negative_delta_counter_treated_as_wraparound_or_reset():
+    calc = RateCalculator()
+    resp1 = SNMPResponse(oid="c", name="ctr", value=500, snmp_type="COUNTER32")
+    resp2 = SNMPResponse(oid="c", name="ctr", value=100, snmp_type="COUNTER32")
+
+    calc.calculate_rate("h", resp1, delta_time=1.0)
+    rate = calc.calculate_rate("h", resp2, delta_time=1.0)
+
+    # Wraparound correction: (100 - 500) + 2^32
+    expected = (100 - 500 + 2**32) / 1.0
+    assert rate == round(expected, 2)
+
+
+def test_monotonicity_never_negative():
+    calc = RateCalculator()
+    resp1 = SNMPResponse(oid="m", name="ctr", value=1000, snmp_type="COUNTER32")
+    resp2 = SNMPResponse(oid="m", name="ctr", value=900, snmp_type="COUNTER32")
+
+    calc.calculate_rate("h", resp1, delta_time=1.0)
+    rate = calc.calculate_rate("h", resp2, delta_time=1.0)
+
+    # Even if delta is negative, rate must never be negative
+    assert rate >= 0.0
+
+
+def test_history_eviction_lru_behavior():
+    calc = RateCalculator()
+    calc.MAX_HISTORY = 5  # shrink for test
+
+    # Insert 5 entries
+    for i in range(5):
+        resp = SNMPResponse(oid=f"oid{i}", name="m", value=i, snmp_type="COUNTER32")
+        calc.calculate_rate("h", resp, delta_time=1.0)
+
+    assert len(calc._history) == 5
+
+    # Insert a 6th → oldest must be evicted
+    resp6 = SNMPResponse(oid="oid6", name="m", value=123, snmp_type="COUNTER32")
+    calc.calculate_rate("h", resp6, delta_time=1.0)
+
+    assert len(calc._history) == 5
+    assert ("h", "oid0") not in calc._history  # evicted
+    assert ("h", "oid6") in calc._history  # inserted
+
+
+def test_history_lru_updates_on_access():
+    calc = RateCalculator()
+    calc.MAX_HISTORY = 3
+
+    # Insert 3 entries
+    for i in range(3):
+        resp = SNMPResponse(oid=f"oid{i}", name="m", value=i, snmp_type="COUNTER32")
+        calc.calculate_rate("h", resp, delta_time=1.0)
+
+    # Access oid0 → becomes most recently used
+    resp0b = SNMPResponse(oid="oid0", name="m", value=10, snmp_type="COUNTER32")
+    calc.calculate_rate("h", resp0b, delta_time=1.0)
+
+    # Insert new entry → should evict oid1 (oldest)
+    resp_new = SNMPResponse(oid="oidX", name="m", value=999, snmp_type="COUNTER32")
+    calc.calculate_rate("h", resp_new, delta_time=1.0)
+
+    assert ("h", "oid1") not in calc._history
+    assert ("h", "oid0") in calc._history
+    assert ("h", "oidX") in calc._history
