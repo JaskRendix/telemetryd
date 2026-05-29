@@ -1,0 +1,60 @@
+import asyncio
+import json
+from unittest.mock import patch
+
+import pytest
+
+from telemetryd.metrics import SNMPResponse
+from telemetryd.scheduler import TelemetryDaemon
+
+
+@pytest.mark.asyncio
+async def test_full_integration_poll_cycle(tmp_path):
+    cfg = {
+        "polling_interval_seconds": 0.01,
+        "devices": [
+            {
+                "host": "h",
+                "port": 161,
+                "community": "c",
+                "metrics": [
+                    {"oid": "1", "type": "COUNTER32", "name": "m"},
+                    {"oid": "2", "type": "COUNTER64", "name": "x"},
+                ],
+            }
+        ],
+    }
+
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+    d = TelemetryDaemon(p)
+
+    seq = [
+        [
+            SNMPResponse("1", "m", 100, "COUNTER32"),
+            SNMPResponse("2", "x", 200, "COUNTER64"),
+        ],
+        [
+            SNMPResponse("1", "m", 160, "COUNTER32"),
+            SNMPResponse("2", "x", 260, "COUNTER64"),
+        ],
+    ]
+
+    async def fake_fetch(host, port, community, metrics):
+        await asyncio.sleep(0)
+        return seq.pop(0)
+
+    with patch.object(d.client, "fetch_metrics", side_effect=fake_fetch):
+        with patch(
+            "telemetryd.scheduler.time.time",
+            side_effect=[
+                100.0,  # first poll: current_time
+                102.0,  # second poll: current_time
+            ],
+        ):
+            await d.poll_device(cfg["devices"][0])
+            await d.poll_device(cfg["devices"][0])
+
+    assert d.calculator._history[("h", "1")] == 160
+    assert d.calculator._history[("h", "2")] == 260
+    assert d._last_poll_time["h"] == 102.0
