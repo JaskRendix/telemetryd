@@ -4,17 +4,17 @@
 
 ---
 
-## Overview
+## Features
 
-The daemon targets printers and other SNMP‑exposed devices that publish monotonic counters. It:
-
-- polls devices concurrently  
-- computes deltas and per‑second rates  
-- handles COUNTER32 and COUNTER64 wraparound  
-- staggers initial polls  
-- enforces per‑device timeouts  
-- maintains a stable polling interval through drift compensation  
-- supports deterministic behavior when an RNG is injected  
+- concurrent polling  
+- per‑second rate calculation  
+- COUNTER32 and COUNTER64 wraparound handling  
+- GAUGE support  
+- deterministic behavior with injected RNG  
+- fixed‑interval scheduling with drift control  
+- per‑device timeouts  
+- staggered initial polls  
+- pluggable reporters (JSON, CSV, Prometheus)
 
 ---
 
@@ -26,7 +26,7 @@ Editable install:
 pip install -e .
 ```
 
-Install test dependencies:
+Test dependencies:
 
 ```
 pip install .[test]
@@ -42,65 +42,54 @@ pytest
 
 ## Architecture
 
-### 1. Scheduler
+### Scheduler
 Runs the polling loop.
 
 - loads configuration  
-- applies per‑device staggering  
+- applies staggering  
 - wraps each poll in a timeout  
-- maintains a fixed polling interval  
+- maintains a fixed interval  
 - supports graceful shutdown  
-- exposes `run_once` for integration tests  
+- exposes `run_once` for tests  
 
-### 2. Async SNMP client
+### SNMP client
 Simulates SNMP polling.
 
-- configurable latency  
-- jitter spikes  
+- latency  
+- jitter  
 - partial metric sets  
 - malformed responses  
 - deterministic behavior with injected RNG  
 
-### 3. Rate calculator
+### Rate calculator
 Computes per‑second rates.
 
 - tracks previous values per `(host, oid)`  
 - handles wraparound  
 - enforces monotonicity  
-- supports GAUGE metrics  
-- uses LRU eviction to bound memory  
+- supports GAUGE  
+- uses LRU eviction  
 
-### 4. Reporter
-Receives:
+### Reporters
+Receive:
 
 - initial values  
 - computed rates  
 - polling errors  
-- timeout errors  
 
-### 5. Configuration
+Built‑in reporters:
+
+- JSON (NDJSON)  
+- CSV  
+- Prometheus text exporter  
+
+### Configuration
 `config.json` defines:
 
 - polling interval  
 - devices  
 - SNMP community  
 - OIDs and SNMP types  
-
-### 6. Tests
-Covers:
-
-- counter initialization  
-- monotonic increments  
-- wraparound  
-- gauge behavior  
-- LRU eviction  
-- deterministic RNG behavior  
-- jitter and partial‑set handling  
-- scheduler concurrency  
-- staggering  
-- timeout handling  
-- integration with simulated SNMP failures  
-- chaos tests for scheduler, SNMP client, and rate calculator  
 
 ---
 
@@ -110,18 +99,23 @@ Covers:
 telemetryd/
 │
 ├── config.json
-├── main.py
 ├── pyproject.toml
 ├── README.md
 │
 ├── src/
 │   └── telemetryd/
 │       ├── __init__.py
+│       ├── main.py
 │       ├── metrics.py
 │       ├── scheduler.py
-│       └── snmp.py
+│       ├── snmp.py
+│       └── ext/
+│           ├── json_reporter.py
+│           ├── csv_reporter.py
+│           └── prometheus_exporter.py
 │
 └── tests/
+    ├── test_main.py
     ├── test_chaos.py
     ├── test_daemon.py
     ├── test_daemon_concurrency.py
@@ -156,14 +150,29 @@ telemetryd/
 
 ## Running the daemon
 
+After installation, the package exposes a `telemetryd` command.
+
+### Reporter selection
+
 ```
-python main.py
+telemetryd --reporter json
+telemetryd --reporter csv
+telemetryd --reporter prometheus
 ```
 
-The scheduler:
+### Custom configuration
 
-- staggers initial polls  
-- polls devices concurrently  
-- computes rates  
-- logs metrics and errors  
-- maintains a fixed interval  
+```
+telemetryd --config config.json --reporter csv
+```
+
+### Reporters
+
+**JSONReporter**  
+Writes NDJSON to `logs/telemetry.jsonl`.
+
+**CSVReporter**  
+Writes CSV rows to `logs/telemetry.csv`.
+
+**PrometheusTextExporter**  
+Exposes a text endpoint on port 9100.

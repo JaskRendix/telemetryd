@@ -13,6 +13,9 @@ test = [
     "pytest-asyncio",
 ]
 
+[project.scripts]
+telemetryd = "telemetryd.main:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
