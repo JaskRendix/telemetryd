@@ -9,6 +9,7 @@ venv/
 # Build artifacts
 build/
 dist/
+logs/
 *.egg-info/
 
 # Pytest cache
