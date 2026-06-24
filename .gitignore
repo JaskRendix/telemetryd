@@ -13,6 +13,7 @@ logs/
 *.egg-info/
 
 # Pytest cache
+.coverage
 .pytest_cache/
 
 # Local config overrides
