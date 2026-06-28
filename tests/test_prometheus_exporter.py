@@ -17,15 +17,21 @@ class DummyResponse(SNMPResponse):
 
 @pytest.fixture
 def exporter():
-    return PrometheusTextExporter(
-        host="127.0.0.1", port=0
-    )  # port=0 → OS assigns free port
+    return PrometheusTextExporter(host="127.0.0.1", port=0)
 
 
 async def read_from_server(host, port):
     reader, writer = await asyncio.open_connection(host, port)
+
+    # Send a proper HTTP request
+    writer.write(b"GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n")
+    await writer.drain()
+
     data = await reader.read()  # read until EOF
+
     writer.close()
+    await writer.wait_closed()
+
     return data.decode("utf-8")
 
 
@@ -57,7 +63,7 @@ def test_init_value_storage(exporter):
 
 def test_error_noop(exporter):
     exporter.error("hostX", Exception("boom"))
-    assert exporter._metrics == {}  # no metrics added
+    assert exporter._metrics == {}
 
 
 @pytest.mark.asyncio
@@ -70,6 +76,15 @@ async def test_prometheus_output_single_metric(exporter):
 
     output = await read_from_server(host, port)
 
+    # HTTP headers present
+    assert "HTTP/1.1 200 OK" in output
+    assert "Content-Type: text/plain" in output
+
+    # HELP/TYPE lines
+    assert "# HELP telemetryd_temp_value" in output
+    assert "# TYPE telemetryd_temp_value gauge" in output
+
+    # Metric lines
     assert 'telemetryd_temp_value{host="sensor1"} 55' in output
     assert 'telemetryd_temp_rate{host="sensor1"} 0.5' in output
     assert 'telemetryd_temp_timestamp{host="sensor1"}' in output
@@ -112,3 +127,17 @@ def test_timestamp_increases(exporter):
     ts2 = exporter._metrics[("h", "x")][2]
 
     assert ts2 > ts1
+
+
+@pytest.mark.asyncio
+async def test_sanitized_metric_names(exporter):
+    resp = DummyResponse(name="weird.metric name!", value=7)
+    exporter.metric("hostZ", resp, rate=0.1)
+
+    await exporter.start_server()
+    host, port = exporter._server.sockets[0].getsockname()
+
+    output = await read_from_server(host, port)
+
+    # Sanitized name: telemetryd_weird_metric_name_
+    assert "telemetryd_weird_metric_name__value" in output

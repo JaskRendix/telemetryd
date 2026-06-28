@@ -184,4 +184,4 @@ Writes NDJSON to `logs/telemetry.jsonl`.
 Writes CSV rows to `logs/telemetry.csv`.
 
 **PrometheusTextExporter**  
-Exposes a text endpoint on port 9100.
+Provides a `/metrics` HTTP endpoint on port 9100 in Prometheus text format, exposing raw counter values, per‑second rates, and timestamps for scraping.
