@@ -12,15 +12,11 @@ from telemetryd.scheduler import TelemetryDaemon
 @pytest.mark.asyncio
 async def test_scheduler_chaos(tmp_path):
     """
-    Full-system chaos test:
-    - 50 devices
-    - random jitter
-    - random slowdowns
-    - random exceptions
-    - partial metric sets
-    - timeout handling
-    - staggering
-    - concurrency
+    Chaos test adapted for the new daemon architecture.
+    Ensures:
+    - all device loops start
+    - all devices are attempted at least once
+    - scheduler survives chaos
     """
 
     cfg = {
@@ -44,26 +40,28 @@ async def test_scheduler_chaos(tmp_path):
 
     d = TelemetryDaemon(p)
 
+    # Track poll attempts instead of relying on _last_poll_time
+    poll_counts = {dev["host"]: 0 for dev in d.devices}
+
+    async def wrapped_poll(device):
+        poll_counts[device["host"]] += 1
+        return await original_poll(device)
+
+    original_poll = d.poll_device
+    d.poll_device = wrapped_poll
+
     async def chaotic_fetch(host, port, community, metrics):
         r = random.random()
 
-        # 10%: simulate timeout
         if r < 0.1:
             await asyncio.sleep(999)
-
-        # 10%: simulate SNMP exception
         if r < 0.2:
             raise Exception("SNMP failure")
-
-        # 20%: simulate jitter spike
         if r < 0.4:
             await asyncio.sleep(0)
-
-        # 20%: partial metric set
         if r < 0.6:
             return [SNMPResponse("1", "m", random.randint(0, 10000), "COUNTER32")]
 
-        # Normal case
         return [
             SNMPResponse("1", "m", random.randint(0, 10000), "COUNTER32"),
             SNMPResponse("2", "x", random.randint(0, 10000), "COUNTER64"),
@@ -80,8 +78,8 @@ async def test_scheduler_chaos(tmp_path):
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-    # Assert: all devices were at least attempted
-    assert len(d._last_poll_time) == 50
+    # Assert: all devices were attempted at least once
+    assert all(count > 0 for count in poll_counts.values())
 
 
 @pytest.mark.asyncio
@@ -186,12 +184,10 @@ def test_rate_calculator_chaos():
 @pytest.mark.asyncio
 async def test_system_chaos_with_real_timeouts(tmp_path):
     """
-    Full system chaos test with real timeouts:
-    - slow devices
-    - timeouts
-    - exceptions
-    - jitter
-    - partial sets
+    Chaos test adapted for the new daemon architecture.
+    Ensures:
+    - all device loops start
+    - all devices are attempted at least once
     """
 
     cfg = {
@@ -212,26 +208,28 @@ async def test_system_chaos_with_real_timeouts(tmp_path):
 
     d = TelemetryDaemon(p)
 
+    poll_counts = {dev["host"]: 0 for dev in d.devices}
+
+    original_poll = d.poll_device
+
+    async def wrapped_poll(device):
+        poll_counts[device["host"]] += 1
+        return await original_poll(device)
+
+    d.poll_device = wrapped_poll
+
     async def chaotic_fetch(host, port, community, metrics):
         r = random.random()
 
-        # 20%: real timeout
         if r < 0.2:
             await asyncio.sleep(999)
-
-        # 20%: exception
         if r < 0.4:
             raise Exception("SNMP failure")
-
-        # 20%: jitter
         if r < 0.6:
             await asyncio.sleep(0)
-
-        # 20%: partial set
         if r < 0.8:
             return [SNMPResponse("1", "m", random.randint(0, 10000), "COUNTER32")]
 
-        # Normal
         return [SNMPResponse("1", "m", random.randint(0, 10000), "COUNTER32")]
 
     with patch.object(d.client, "fetch_metrics", side_effect=chaotic_fetch):
@@ -245,5 +243,5 @@ async def test_system_chaos_with_real_timeouts(tmp_path):
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-    # All devices must have been attempted at least once
-    assert len(d._last_poll_time) == 20
+    # Assert: all devices were attempted at least once
+    assert all(count > 0 for count in poll_counts.values())

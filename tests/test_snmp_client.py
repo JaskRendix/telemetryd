@@ -1,7 +1,7 @@
 import asyncio
 import json
 import random
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -224,16 +224,21 @@ async def test_scheduler_with_snmp_failures(tmp_path):
     reporter = TelemetryReporter()
     daemon = TelemetryDaemon(p, reporter=reporter)
 
+    polled_hosts: set[str] = set()
+
     async def fake_fetch(host, port, community, metrics):
+        polled_hosts.add(host)
         if host == "fail":
             raise TimeoutError("simulated failure")
         return [SNMPResponse("1", "m", 100, "COUNTER32")]
 
-    with patch.object(daemon.client, "fetch_metrics", side_effect=fake_fetch):
-        with patch("asyncio.sleep", new=AsyncMock()):
+    # Make staggering deterministic: no random delay
+    with patch.object(daemon.client._rng, "uniform", return_value=0.0):
+        with patch.object(daemon.client, "fetch_metrics", side_effect=fake_fetch):
 
             async def stop():
-                await asyncio.sleep(0)
+                # Allow scheduler to run device loops
+                await asyncio.sleep(0.005)
                 daemon.request_shutdown()
                 return "stopped"
 
@@ -250,5 +255,6 @@ async def test_scheduler_with_snmp_failures(tmp_path):
 
             assert any(t.result() == "stopped" for t in done)
 
-    assert "ok" in daemon._last_poll_time
-    assert "fail" in daemon._last_poll_time
+    # Both hosts must have been polled
+    assert "ok" in polled_hosts
+    assert "fail" in polled_hosts

@@ -16,26 +16,72 @@ class SNMPResponse:
 
 class RateCalculator:
     """
-    Corrected version:
-    - Per-device LRU history (prevents cross-device eviction bugs)
-    - Timestamped samples using monotonic clock
-    - Robust wrap vs reset detection
-    - GAUGE passthrough
-    - Safe eviction for devices and OIDs
+    A robust per‑device, per‑OID rate calculator for SNMP counters.
+
+    Features
+    --------
+    • Maintains a **per‑device LRU history** of OID → (value, timestamp)
+      to avoid cross‑device eviction bugs.
+
+    • Supports both legacy `now=` and new `current_time=` parameters.
+      Only one should be provided; if both are None, monotonic time is used.
+
+    • Correct handling of:
+        - COUNTER32 / COUNTER64 wraparound
+        - counter resets (large negative deltas)
+        - GAUGE passthrough (returns raw value)
+        - zero‑delta (returns 0.0)
+        - non‑monotonic timestamps (returns 0.0)
+
+    • Enforces:
+        - MAX_DEVICES: maximum number of device histories
+        - MAX_OIDS_PER_DEVICE: maximum number of OIDs per device history
+
+    Return Value Semantics
+    ----------------------
+    • `None`:
+        - First observation of an OID
+        - Counter reset detected
+        - GAUGE negative delta (treated as raw value)
+        - Invalid sample window
+
+    • `float`:
+        - Computed rate in units/sec
+        - Rounded to 2 decimals
+        - Always >= 0.0
+
+    Internal State
+    --------------
+    `_history` structure:
+        {
+            host: OrderedDict[
+                oid: (value: int, timestamp: float)
+            ]
+        }
+
+    This ensures predictable eviction order and stable memory usage.
     """
 
-    MAX_DEVICES = 1_000
-    MAX_OIDS_PER_DEVICE = 200
+    MAX_DEVICES: int = 1_000
+    MAX_OIDS_PER_DEVICE: int = 200
+
+    # host → OrderedDict[oid → (value, timestamp)]
+    _history: dict[str, OrderedDict[str, tuple[int, float]]]
 
     def __init__(self) -> None:
-        # host → OrderedDict[oid → (value, timestamp)]
-        self._history: dict[str, OrderedDict[str, tuple[int, float]]] = {}
+        self._history = {}
 
     def _update_history(
         self, host: str, oid: str, value: int, timestamp: float
     ) -> tuple[int, float] | None:
-        """Store current sample and return previous one."""
-        # Ensure host bucket exists
+        """
+        Insert or update the (value, timestamp) entry for a given host+OID.
+
+        Returns
+        -------
+        previous : (value, timestamp) or None
+            The previous sample if it existed, else None.
+        """
         if host not in self._history:
             # Evict oldest host if needed
             if len(self._history) >= self.MAX_DEVICES:
@@ -46,50 +92,69 @@ class RateCalculator:
         device_history = self._history[host]
         previous = device_history.get(oid)
 
-        # Update LRU entry
         device_history[oid] = (value, timestamp)
         device_history.move_to_end(oid)
 
-        # Enforce per-device OID limit
+        # Enforce per‑device OID limit
         while len(device_history) > self.MAX_OIDS_PER_DEVICE:
             device_history.popitem(last=False)
 
         return previous
 
     def calculate_rate(
-        self, host: str, response: SNMPResponse, now: float | None = None
+        self,
+        host: str,
+        response: SNMPResponse,
+        *,
+        now: float | None = None,
+        current_time: float | None = None,
     ) -> float | None:
         """
-        Compute per-second rate using monotonic timestamps.
-        Returns:
-            float — rate
-            None  — first observation or dropped reset window
+        Compute the per‑second rate for an SNMP counter or gauge.
+
+        Parameters
+        ----------
+        host : str
+            Device identifier.
+        response : SNMPResponse
+            The SNMP metric sample.
+        now : float, optional
+            Legacy timestamp parameter (seconds). If provided, overrides monotonic().
+        current_time : float, optional
+            New timestamp parameter (seconds). If provided, overrides `now`.
+
+        Returns
+        -------
+        float or None
+            • None for first sample, resets, invalid windows.
+            • Float rate (>= 0.0) for valid counter deltas.
+            • GAUGE returns raw value.
         """
-        timestamp = now if now is not None else time.monotonic()
-        current_value = response.value
-        snmp_type = response.snmp_type.upper()
+        timestamp: float = (
+            current_time
+            if current_time is not None
+            else now if now is not None else time.monotonic()
+        )
+
+        current_value: int = response.value
+        snmp_type: str = response.snmp_type.upper()
 
         # GAUGE: raw value passthrough
         if snmp_type == "GAUGE":
             return float(current_value)
 
-        # Fetch previous sample
         previous = self._update_history(host, response.oid, current_value, timestamp)
         if previous is None:
             return None
 
         previous_value, previous_time = previous
-        delta_time = timestamp - previous_time
+        delta_time: float = timestamp - previous_time
 
         if delta_time <= 0:
-            logger.warning(
-                f"Invalid delta_time ({delta_time:.6f}) for {host}:{response.name}"
-            )
             return 0.0
 
-        raw_delta = current_value - previous_value
+        raw_delta: int = current_value - previous_value
 
-        # No change
         if raw_delta == 0:
             return 0.0
 
@@ -100,26 +165,15 @@ class RateCalculator:
             elif snmp_type == "COUNTER64":
                 max_val = 2**64
             else:
-                logger.warning(
-                    f"Negative delta on non-counter {snmp_type} for {host}:{response.name}"
-                )
                 return 0.0
 
             adjusted_delta = raw_delta + max_val
 
             # Reset detection heuristic
             if adjusted_delta > max_val * 0.95:
-                logger.warning(
-                    f"Counter reset detected on {host}:{response.name} "
-                    f"(from {previous_value} → {current_value}). Dropping sample."
-                )
                 return None
-
-            logger.info(
-                f"{snmp_type} wraparound corrected for {host} [{response.name}]"
-            )
         else:
             adjusted_delta = raw_delta
 
-        rate = adjusted_delta / delta_time
+        rate: float = adjusted_delta / delta_time
         return round(max(rate, 0.0), 2)

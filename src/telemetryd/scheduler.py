@@ -53,12 +53,8 @@ class TelemetryDaemon:
         self.calculator = calculator or RateCalculator()
         self.reporter = reporter or TelemetryReporter(logging.getLogger(__name__))
 
-        self._last_poll_time: dict[str, float] = {}
         self._shutdown_event: asyncio.Event = asyncio.Event()
-
-        self._stagger: dict[str, float] = {
-            d["host"]: self.client._rng.uniform(0, self.interval) for d in self.devices
-        }
+        self._tasks: list[asyncio.Task] = []
 
     def _load_config(self, path: Path) -> ProgramConfig:
         with open(path, "r") as f:
@@ -66,6 +62,8 @@ class TelemetryDaemon:
 
     def request_shutdown(self) -> None:
         self._shutdown_event.set()
+        for task in self._tasks:
+            task.cancel()
 
     async def poll_device(self, device: DeviceConfig) -> None:
         host = device["host"]
@@ -73,67 +71,71 @@ class TelemetryDaemon:
         community = device["community"]
         metrics_cfg = device["metrics"]
 
-        current_time = time.time()
-        previous_time = self._last_poll_time.get(host)
-        delta_time = current_time - previous_time if previous_time else 0.0
-        self._last_poll_time[host] = current_time
-
         try:
             responses = await self.client.fetch_metrics(
                 host, port, community, metrics_cfg
             )
 
+            arrival_time = time.time()
+
             for resp in responses:
-                rate = self.calculator.calculate_rate(host, resp, delta_time)
+                rate = self.calculator.calculate_rate(
+                    host, resp, current_time=arrival_time
+                )
                 if rate is not None:
                     self.reporter.metric(host, resp, rate)
                 else:
                     self.reporter.init_value(host, resp)
+
         except Exception as e:
             self.reporter.error(host, e)
+
+    async def _device_loop(self, device: DeviceConfig) -> None:
+        host = device["host"]
+
+        # per-device staggering using client's RNG (patched in tests)
+        initial_delay = self.client._rng.uniform(0, self.interval)
+        try:
+            await asyncio.sleep(initial_delay)
+        except asyncio.CancelledError:
+            return
+
+        while not self._shutdown_event.is_set():
+            loop_start = time.time()
+
+            try:
+                await asyncio.wait_for(self.poll_device(device), timeout=self.interval)
+            except asyncio.TimeoutError:
+                self.reporter.error(host, TimeoutError("poll timeout"))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.reporter.error(host, e)
+
+            elapsed = time.time() - loop_start
+            sleep_adjustment = max(0.0, self.interval - elapsed)
+
+            try:
+                await asyncio.sleep(sleep_adjustment)
+            except asyncio.CancelledError:
+                break
 
     async def run_once(self, devices: Iterable[DeviceConfig] | None = None) -> float:
         targets = list(devices) if devices is not None else self.devices
         start_loop = time.time()
         tasks = [self.poll_device(device) for device in targets]
         if tasks:
-            await asyncio.gather(*tasks)
-        execution_duration = time.time() - start_loop
-        return execution_duration
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return time.time() - start_loop
 
     async def start(self) -> None:
         self.reporter.startup(len(self.devices), self.interval)
 
-        # Staggered initial polls (non-blocking)
-        stagger_tasks = []
-        for device in self.devices:
-            host = device["host"]
-            offset = self._stagger[host]
+        self._tasks = [
+            asyncio.create_task(self._device_loop(device)) for device in self.devices
+        ]
 
-            async def delayed_poll(dev=device, delay=offset):
-                await asyncio.sleep(delay)
-                await self.poll_device(dev)
-
-            stagger_tasks.append(asyncio.create_task(delayed_poll()))
-
-        # Wait for staggered polls to finish
-        if stagger_tasks:
-            await asyncio.gather(*stagger_tasks)
-
-        # Main loop with drift compensation + timeout handling
-        while not self._shutdown_event.is_set():
-            start_ts = time.time()
-
-            # Timeout wrapper for each device
-            async def safe_poll(dev):
-                try:
-                    await asyncio.wait_for(self.poll_device(dev), timeout=self.interval)
-                except asyncio.TimeoutError:
-                    self.reporter.error(dev["host"], TimeoutError("poll timeout"))
-
-            await asyncio.gather(*(safe_poll(d) for d in self.devices))
-
-            elapsed = time.time() - start_ts
-            sleep_adjustment = max(0.0, self.interval - elapsed)
-            if sleep_adjustment > 0:
-                await asyncio.sleep(sleep_adjustment)
+        try:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            pass

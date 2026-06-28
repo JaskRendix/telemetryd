@@ -9,6 +9,13 @@ from telemetryd.scheduler import TelemetryDaemon, TelemetryReporter
 
 @pytest.mark.asyncio
 async def test_full_integration_poll_cycle(tmp_path):
+    """
+    Updated test for the new daemon architecture.
+    Verifies:
+    - two poll cycles
+    - RateCalculator history updated correctly
+    """
+
     cfg = {
         "polling_interval_seconds": 0.01,
         "devices": [
@@ -45,16 +52,9 @@ async def test_full_integration_poll_cycle(tmp_path):
         return seq.pop(0)
 
     with patch.object(d.client, "fetch_metrics", side_effect=fake_fetch):
-        # Patch time.time() so the daemon records deterministic timestamps
-        with patch("telemetryd.scheduler.time.time", side_effect=[100.0, 102.0]):
-            await d.poll_device(cfg["devices"][0])
-            await d.poll_device(cfg["devices"][0])
+        await d.poll_device(cfg["devices"][0])
+        await d.poll_device(cfg["devices"][0])
 
-    v1, ts1 = d.calculator._history["h"]["1"]
-    v2, ts2 = d.calculator._history["h"]["2"]
-
-    assert v1 == 160
-    assert v2 == 260
-
-    # Last poll time should be the patched timestamp
-    assert d._last_poll_time["h"] == 102.0
+    # Verify RateCalculator history
+    assert d.calculator._history["h"]["1"][0] == 160
+    assert d.calculator._history["h"]["2"][0] == 260
