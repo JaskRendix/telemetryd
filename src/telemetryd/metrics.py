@@ -1,4 +1,5 @@
 import logging
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -15,77 +16,110 @@ class SNMPResponse:
 
 class RateCalculator:
     """
-    Improvements in Step 4:
-    - Monotonicity guarantees: negative deltas only allowed for wraparound
-    - Gauge support: GAUGE returns raw value, no delta
-    - History eviction: prevent unbounded memory growth
+    Corrected version:
+    - Per-device LRU history (prevents cross-device eviction bugs)
+    - Timestamped samples using monotonic clock
+    - Robust wrap vs reset detection
+    - GAUGE passthrough
+    - Safe eviction for devices and OIDs
     """
 
-    # Maximum number of (host, oid) entries to keep
-    MAX_HISTORY = 10_000
+    MAX_DEVICES = 1_000
+    MAX_OIDS_PER_DEVICE = 200
 
     def __init__(self) -> None:
-        # Use OrderedDict for LRU eviction
-        self._history: OrderedDict[tuple[str, str], int] = OrderedDict()
+        # host → OrderedDict[oid → (value, timestamp)]
+        self._history: dict[str, OrderedDict[str, tuple[int, float]]] = {}
 
-    def _evict_if_needed(self) -> None:
-        """Evict oldest entries if history grows too large."""
-        while len(self._history) > self.MAX_HISTORY:
-            self._history.popitem(last=False)
+    def _update_history(
+        self, host: str, oid: str, value: int, timestamp: float
+    ) -> tuple[int, float] | None:
+        """Store current sample and return previous one."""
+        # Ensure host bucket exists
+        if host not in self._history:
+            # Evict oldest host if needed
+            if len(self._history) >= self.MAX_DEVICES:
+                oldest_host = next(iter(self._history))
+                self._history.pop(oldest_host)
+            self._history[host] = OrderedDict()
+
+        device_history = self._history[host]
+        previous = device_history.get(oid)
+
+        # Update LRU entry
+        device_history[oid] = (value, timestamp)
+        device_history.move_to_end(oid)
+
+        # Enforce per-device OID limit
+        while len(device_history) > self.MAX_OIDS_PER_DEVICE:
+            device_history.popitem(last=False)
+
+        return previous
 
     def calculate_rate(
-        self, host: str, response: SNMPResponse, delta_time: float
+        self, host: str, response: SNMPResponse, now: float | None = None
     ) -> float | None:
-        key = (host, response.oid)
+        """
+        Compute per-second rate using monotonic timestamps.
+        Returns:
+            float — rate
+            None  — first observation or dropped reset window
+        """
+        timestamp = now if now is not None else time.monotonic()
         current_value = response.value
-        previous_value = self._history.get(key)
+        snmp_type = response.snmp_type.upper()
 
-        # Move key to end (LRU behavior)
-        self._history[key] = current_value
-        self._history.move_to_end(key)
-
-        # Evict old entries
-        self._evict_if_needed()
-
-        # GAUGE: always return raw value, even on first poll
-        if response.snmp_type.upper() == "GAUGE":
+        # GAUGE: raw value passthrough
+        if snmp_type == "GAUGE":
             return float(current_value)
 
-        # First observation for counters → no rate
-        if previous_value is None:
+        # Fetch previous sample
+        previous = self._update_history(host, response.oid, current_value, timestamp)
+        if previous is None:
             return None
 
-        # Invalid delta_time
+        previous_value, previous_time = previous
+        delta_time = timestamp - previous_time
+
         if delta_time <= 0:
             logger.warning(
-                f"Invalid delta_time ({delta_time}) for {host}:{response.name}"
+                f"Invalid delta_time ({delta_time:.6f}) for {host}:{response.name}"
             )
             return 0.0
 
         raw_delta = current_value - previous_value
 
-        # Handle wraparound or reset
+        # No change
+        if raw_delta == 0:
+            return 0.0
+
+        # Handle wrap or reset
         if raw_delta < 0:
-            match response.snmp_type.upper():
-                case "COUNTER32" | "COUNTER":
-                    adjusted_delta = raw_delta + (2**32)
-                    logger.info(
-                        f"Counter32 wraparound corrected for {host} [{response.name}]"
-                    )
-                case "COUNTER64":
-                    adjusted_delta = raw_delta + (2**64)
-                    logger.info(
-                        f"Counter64 wraparound corrected for {host} [{response.name}]"
-                    )
-                case _:
-                    # Negative delta on non-counter → treat as reset
-                    logger.warning(
-                        f"Negative delta for non-counter {response.snmp_type} on {host}:{response.name}"
-                    )
-                    return 0.0
+            if snmp_type in ("COUNTER32", "COUNTER"):
+                max_val = 2**32
+            elif snmp_type == "COUNTER64":
+                max_val = 2**64
+            else:
+                logger.warning(
+                    f"Negative delta on non-counter {snmp_type} for {host}:{response.name}"
+                )
+                return 0.0
+
+            adjusted_delta = raw_delta + max_val
+
+            # Reset detection heuristic
+            if adjusted_delta > max_val * 0.95:
+                logger.warning(
+                    f"Counter reset detected on {host}:{response.name} "
+                    f"(from {previous_value} → {current_value}). Dropping sample."
+                )
+                return None
+
+            logger.info(
+                f"{snmp_type} wraparound corrected for {host} [{response.name}]"
+            )
         else:
             adjusted_delta = raw_delta
 
-        # Monotonicity guarantee
         rate = adjusted_delta / delta_time
         return round(max(rate, 0.0), 2)

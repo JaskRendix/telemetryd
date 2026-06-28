@@ -83,11 +83,18 @@ async def test_poll_device_rate(tmp_path):
         return seq.pop(0)
 
     with patch.object(d.client, "fetch_metrics", side_effect=fake_fetch):
+        # First poll
         await d.poll_device(cfg["devices"][0])
         t0 = d._last_poll_time["h"]
+
+        # Second poll
         await asyncio.sleep(0.01)
         await d.poll_device(cfg["devices"][0])
-        assert d.calculator._history[("h", "1")] == 150
+
+        value, ts = d.calculator._history["h"]["1"]
+        assert value == 150
+
+        # Ensure last poll time updated
         assert d._last_poll_time["h"] != t0
 
 

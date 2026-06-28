@@ -150,6 +150,7 @@ def test_rate_calculator_chaos():
     oid = "1"
 
     last_value = 0
+    t = 1000.0  # deterministic monotonic timestamp
 
     for _ in range(500):
         r = random.random()
@@ -171,9 +172,12 @@ def test_rate_calculator_chaos():
             value = last_value + random.randint(0, 1000)
 
         resp = SNMPResponse(oid, "m", value, "COUNTER32")
-        rate = calc.calculate_rate(host, resp, delta_time=1.0)
 
-        # Rate must always be non-negative
+        # Advance time by 1 second per iteration
+        t += 1.0
+        rate = calc.calculate_rate(host, resp, now=t)
+
+        # Rate must always be non-negative or None (reset)
         assert rate is None or rate >= 0
 
         last_value = value
