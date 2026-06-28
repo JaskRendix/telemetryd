@@ -74,10 +74,10 @@ async def test_independent_oids():
 @pytest.mark.asyncio
 async def test_forced_overflow_branch():
     rng = random.Random()
-    rng.random = lambda: 0.99
+    rng.random = lambda: 0.0  # always below wrap_frequency
     rng.randint = lambda a, b: 50
 
-    client = AsyncSNMPClient(rng=rng)
+    client = AsyncSNMPClient(rng=rng, wrap_frequency=1.0)
     metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
 
     client._mock_accumulators["h:1"] = 100
@@ -258,3 +258,143 @@ async def test_scheduler_with_snmp_failures(tmp_path):
     # Both hosts must have been polled
     assert "ok" in polled_hosts
     assert "fail" in polled_hosts
+
+
+@pytest.mark.asyncio
+async def test_per_oid_latency_override():
+    calls = []
+
+    async def fake_sleep(duration):
+        calls.append(duration)
+
+    rng = random.Random(123)
+    client = AsyncSNMPClient(
+        rng=rng,
+        latency_range=(0.01, 0.01),
+        per_oid_latency={"1": (0.2, 0.4)},
+    )
+
+    metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
+
+    with patch("asyncio.sleep", side_effect=fake_sleep):
+        await client.fetch_metrics("h", 161, "c", metrics)
+
+    assert any(0.2 <= d <= 0.4 for d in calls)
+
+
+@pytest.mark.asyncio
+async def test_per_device_latency_override():
+    calls = []
+
+    async def fake_sleep(duration):
+        calls.append(duration)
+
+    rng = random.Random(123)
+    client = AsyncSNMPClient(
+        rng=rng,
+        latency_range=(0.01, 0.01),
+        per_device_latency={"h": (0.3, 0.3)},
+    )
+
+    metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
+
+    with patch("asyncio.sleep", side_effect=fake_sleep):
+        await client.fetch_metrics("h", 161, "c", metrics)
+
+    assert any(abs(d - 0.3) < 1e-6 for d in calls)
+
+
+@pytest.mark.asyncio
+async def test_per_device_jitter_profile():
+    calls = []
+
+    async def fake_sleep(duration):
+        calls.append(duration)
+
+    rng = random.Random(123)
+    client = AsyncSNMPClient(
+        rng=rng,
+        latency_range=(0.01, 0.01),
+        per_device_jitter={"h": (0.5, 0.5)},
+    )
+
+    metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
+
+    with patch("asyncio.sleep", side_effect=fake_sleep):
+        await client.fetch_metrics("h", 161, "c", metrics)
+
+    # first sleep: base latency, second: device jitter
+    assert len(calls) >= 2
+    assert any(abs(d - 0.5) < 1e-6 for d in calls[1:])
+
+
+@pytest.mark.asyncio
+async def test_per_oid_failure_rate():
+    rng = random.Random()
+    rng.random = lambda: 0.0  # always below per-oid failure rate
+
+    client = AsyncSNMPClient(
+        rng=rng,
+        per_oid_failure={"1": 1.0},
+    )
+
+    metrics = [{"oid": "1", "type": "COUNTER32", "name": "m"}]
+
+    with pytest.raises(TimeoutError):
+        await client.fetch_metrics("h", 161, "c", metrics)
+
+
+@pytest.mark.asyncio
+async def test_per_device_partial_profile():
+    rng = random.Random()
+    rng.random = lambda: 0.0  # always below per-device partial rate
+
+    client = AsyncSNMPClient(
+        rng=rng,
+        partial_rate=0.0,
+        per_device_partial={"h": 1.0},
+    )
+
+    metrics = [
+        {"oid": "1", "type": "COUNTER32", "name": "m1"},
+        {"oid": "2", "type": "COUNTER32", "name": "m2"},
+        {"oid": "3", "type": "COUNTER32", "name": "m3"},
+    ]
+
+    r = await client.fetch_metrics("h", 161, "c", metrics)
+    assert 1 <= len(r) <= 2
+
+
+@pytest.mark.asyncio
+async def test_type_specific_increment_distributions():
+    rng = random.Random(123)
+
+    def inc32(r: random.Random) -> int:
+        return 100
+
+    def inc64(r: random.Random) -> int:
+        return 1000
+
+    client = AsyncSNMPClient(
+        rng=rng,
+        increment_distributions={
+            "COUNTER32": inc32,
+            "COUNTER64": inc64,
+        },
+    )
+
+    metrics = [
+        {"oid": "1", "type": "COUNTER32", "name": "m32"},
+        {"oid": "2", "type": "COUNTER64", "name": "m64"},
+    ]
+
+    r1 = await client.fetch_metrics("h", 161, "c", metrics)
+    r2 = await client.fetch_metrics("h", 161, "c", metrics)
+
+    v1_32 = r1[0].value
+    v2_32 = r2[0].value
+    v1_64 = r1[1].value
+    v2_64 = r2[1].value
+
+    assert v2_32 - v1_32 == 100
+    assert v2_64 - v1_64 == 1000

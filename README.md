@@ -53,13 +53,22 @@ Runs the polling loop.
 - exposes `run_once` for tests  
 
 ### SNMP client
-Simulates SNMP polling.
+Simulates SNMP polling with deterministic behavior and optional realism profiles.
 
-- latency  
-- jitter  
+- base latency  
+- jitter spikes  
 - partial metric sets  
 - malformed responses  
 - deterministic behavior with injected RNG  
+- per‑OID latency overrides  
+- per‑device latency profiles  
+- per‑device jitter profiles  
+- per‑OID failure rates  
+- per‑device partial‑response rates  
+- configurable wrap frequency for COUNTER32  
+- SNMP type‑specific increment distributions  
+
+These options allow controlled simulation of degraded networks, slow devices, flaky OIDs, and realistic counter behavior. All realism knobs are optional; if not provided, the client behaves like a simple deterministic SNMP simulator.
 
 ### Rate calculator
 Computes per‑second rates.
