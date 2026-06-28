@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from telemetryd.ext.csv_reporter import CSVReporter
@@ -7,22 +9,58 @@ from telemetryd.ext.json_reporter import JSONReporter
 from telemetryd.ext.prometheus_exporter import PrometheusTextExporter
 from telemetryd.scheduler import TelemetryDaemon
 
+logger = logging.getLogger(__name__)
+
+ReporterFactory = Callable[[], object]
+
+
+REPORTERS: dict[str, ReporterFactory] = {
+    "json": lambda: JSONReporter("logs/telemetry.jsonl"),
+    "csv": lambda: CSVReporter("logs/telemetry.csv"),
+    "prometheus": lambda: PrometheusTextExporter(port=9100),
+}
+
 
 def build_reporter(kind: str):
-    if kind == "json":
-        return JSONReporter("logs/telemetry.jsonl")
-    if kind == "csv":
-        return CSVReporter("logs/telemetry.csv")
-    if kind == "prometheus":
-        return PrometheusTextExporter(port=9100)
-    raise ValueError(f"Unknown reporter type: {kind}")
+    """
+    Return a reporter instance for the given kind.
+
+    Parameters
+    ----------
+    kind : str
+        One of: "json", "csv", "prometheus".
+
+    Returns
+    -------
+    object
+        Reporter instance.
+
+    Raises
+    ------
+    ValueError
+        If the reporter type is unknown.
+    """
+    try:
+        return REPORTERS[kind]()
+    except KeyError:
+        raise ValueError(f"Unknown reporter type: {kind}") from None
 
 
-async def main():
+async def main() -> None:
+    """
+    Entry point for the telemetryd daemon.
+
+    Responsibilities:
+    - Parse CLI arguments
+    - Validate configuration path
+    - Build reporter
+    - Start Prometheus server if needed
+    - Launch TelemetryDaemon
+    """
     parser = argparse.ArgumentParser(description="Telemetryd SNMP polling daemon")
     parser.add_argument(
         "--reporter",
-        choices=["json", "csv", "prometheus"],
+        choices=list(REPORTERS.keys()),
         default="json",
         help="Select output reporter",
     )
@@ -35,6 +73,9 @@ async def main():
     args = parser.parse_args()
 
     config_file = Path(args.config)
+    if not config_file.exists():
+        raise FileNotFoundError(f"Configuration file not found: {config_file}")
+
     reporter = build_reporter(args.reporter)
 
     if isinstance(reporter, PrometheusTextExporter):
