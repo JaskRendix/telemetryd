@@ -1,8 +1,11 @@
 import csv
+import logging
 import time
 from pathlib import Path
 
 from telemetryd.metrics import SNMPResponse
+
+logger = logging.getLogger(__name__)
 
 
 class CSVReporter:
@@ -15,12 +18,12 @@ class CSVReporter:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Open file in append mode
         self._fh = self._path.open("a", newline="", encoding="utf-8")
         self._writer = csv.writer(self._fh)
 
         # Write header only if file is empty
         if self._path.stat().st_size == 0:
+            logger.info(f"Creating new CSV file with header at {self._path}")
             self._writer.writerow(
                 [
                     "timestamp",
@@ -35,12 +38,15 @@ class CSVReporter:
                 ]
             )
             self._fh.flush()
+        else:
+            logger.info(f"Appending to existing CSV file at {self._path}")
 
     def _write(self, row: list) -> None:
         self._writer.writerow(row)
         self._fh.flush()
 
     def startup(self, device_count: int, interval: float) -> None:
+        logger.info(f"Startup event: {device_count} devices, interval={interval}s")
         self._write(
             [
                 time.time(),
@@ -86,6 +92,7 @@ class CSVReporter:
         )
 
     def error(self, host: str, exc: Exception) -> None:
+        logger.error(f"Error event for {host}: {exc}")
         self._write(
             [
                 time.time(),
@@ -101,4 +108,14 @@ class CSVReporter:
         )
 
     def close(self) -> None:
-        self._fh.close()
+        try:
+            self._fh.close()
+            logger.info("CSVReporter file handle closed")
+        except Exception as e:
+            logger.error(f"Failed to close CSVReporter file handle: {e}")
+
+    def __del__(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
