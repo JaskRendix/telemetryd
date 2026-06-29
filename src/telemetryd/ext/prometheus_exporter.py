@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import time
 
 from telemetryd.metrics import SNMPResponse
+
+logger = logging.getLogger(__name__)
 
 
 class PrometheusTextExporter:
@@ -15,37 +18,25 @@ class PrometheusTextExporter:
         self._port = port
 
         # Store latest metric values
-        # Key: (host, metric_name)
-        # Value: (value, rate, timestamp)
         self._metrics: dict[tuple[str, str], tuple[int, float, float]] = {}
 
         # Async server handle
         self._server: asyncio.AbstractServer | None = None
 
+        logger.info(f"PrometheusTextExporter initialized on {host}:{port}")
+
     @staticmethod
     def _sanitize_metric_name(name: str) -> str:
-        """
-        Sanitize metric name to Prometheus-compatible format:
-        [a-zA-Z_:][a-zA-Z0-9_:]*
-        """
         import re
 
-        # Replace invalid chars with underscore
         name = re.sub(r"[^a-zA-Z0-9_:]", "_", name)
-
-        # Ensure it starts with a letter or underscore
         if not name or not re.match(r"[a-zA-Z_]", name[0]):
             name = f"m_{name}"
-
         return name
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """
-        Serve Prometheus text exposition format on /metrics.
-        Very small HTTP parser: only supports GET /metrics.
-        """
         try:
             request_line = await reader.readline()
             if not request_line:
@@ -58,14 +49,13 @@ class PrometheusTextExporter:
             except ValueError:
                 method, path = "GET", "/"
 
-            # Drain remaining headers
+            # Drain headers
             while True:
                 line = await reader.readline()
                 if not line or line in (b"\r\n", b"\n"):
                     break
 
             if method != "GET" or path != "/metrics":
-                # Minimal 404
                 writer.write(
                     b"HTTP/1.1 404 Not Found\r\n"
                     b"Content-Type: text/plain\r\n"
@@ -78,10 +68,8 @@ class PrometheusTextExporter:
                 await writer.wait_closed()
                 return
 
-            # Build Prometheus payload
+            # Build payload
             lines: list[str] = []
-
-            # Optional HELP/TYPE lines per metric base name
             seen_bases: set[str] = set()
 
             for (host, name), (value, rate, ts) in self._metrics.items():
@@ -103,18 +91,12 @@ class PrometheusTextExporter:
                     lines.append(f"# TYPE {metric_base}_timestamp gauge")
                     seen_bases.add(metric_base)
 
-                # Raw value
                 lines.append(f'{metric_base}_value{{host="{host}"}} {value}')
-
-                # Rate
                 lines.append(f'{metric_base}_rate{{host="{host}"}} {rate}')
-
-                # Timestamp
                 lines.append(f'{metric_base}_timestamp{{host="{host}"}} {ts}')
 
             payload = "\n".join(lines) + "\n"
 
-            # HTTP response
             body = payload.encode("utf-8")
             headers = (
                 b"HTTP/1.1 200 OK\r\n"
@@ -126,19 +108,21 @@ class PrometheusTextExporter:
 
             writer.write(headers + body)
             await writer.drain()
+
         finally:
             writer.close()
             await writer.wait_closed()
 
     async def start_server(self) -> None:
-        """Start the Prometheus HTTP endpoint."""
         self._server = await asyncio.start_server(
             self._handle_client, self._host, self._port
         )
+        logger.info(f"Prometheus exporter listening on {self._host}:{self._port}")
 
     def startup(self, device_count: int, interval: float) -> None:
-        # No-op for Prometheus
-        pass
+        logger.info(
+            f"Prometheus exporter startup: {device_count} devices, interval={interval}s"
+        )
 
     def metric(self, host: str, response: SNMPResponse, rate: float) -> None:
         self._metrics[(host, response.name)] = (
@@ -146,15 +130,31 @@ class PrometheusTextExporter:
             rate,
             time.time(),
         )
+        logger.debug(
+            f"Metric updated: {host}/{response.name} value={response.value} rate={rate}"
+        )
 
     def init_value(self, host: str, response: SNMPResponse) -> None:
-        # Store initial value with rate=0.0
         self._metrics[(host, response.name)] = (
             response.value,
             0.0,
             time.time(),
         )
+        logger.debug(
+            f"Initial value stored: {host}/{response.name} value={response.value}"
+        )
 
     def error(self, host: str, exc: Exception) -> None:
-        # Prometheus exporters typically do not expose errors as metrics
-        pass
+        logger.error(f"Prometheus exporter error for {host}: {exc}")
+
+    def close(self) -> None:
+        if self._server:
+            self._server.close()
+            logger.info("Prometheus exporter server closed")
+
+    def __del__(self):
+        try:
+            if self._server:
+                self._server.close()
+        except Exception:
+            pass
