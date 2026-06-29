@@ -76,7 +76,7 @@ class TelemetryDaemon:
                 host, port, community, metrics_cfg
             )
 
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
 
             for resp in responses:
                 rate = self.calculator.calculate_rate(
@@ -93,7 +93,6 @@ class TelemetryDaemon:
     async def _device_loop(self, device: DeviceConfig) -> None:
         host = device["host"]
 
-        # per-device staggering using client's RNG (patched in tests)
         initial_delay = self.client._rng.uniform(0, self.interval)
         try:
             await asyncio.sleep(initial_delay)
@@ -101,7 +100,7 @@ class TelemetryDaemon:
             return
 
         while not self._shutdown_event.is_set():
-            loop_start = time.time()
+            loop_start = time.monotonic()
 
             try:
                 await asyncio.wait_for(self.poll_device(device), timeout=self.interval)
@@ -112,7 +111,7 @@ class TelemetryDaemon:
             except Exception as e:
                 self.reporter.error(host, e)
 
-            elapsed = time.time() - loop_start
+            elapsed = time.monotonic() - loop_start
             sleep_adjustment = max(0.0, self.interval - elapsed)
 
             try:
@@ -122,11 +121,11 @@ class TelemetryDaemon:
 
     async def run_once(self, devices: Iterable[DeviceConfig] | None = None) -> float:
         targets = list(devices) if devices is not None else self.devices
-        start_loop = time.time()
+        start_loop = time.monotonic()
         tasks = [self.poll_device(device) for device in targets]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        return time.time() - start_loop
+        return time.monotonic() - start_loop
 
     async def start(self) -> None:
         self.reporter.startup(len(self.devices), self.interval)

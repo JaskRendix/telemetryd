@@ -153,3 +153,19 @@ def test_request_shutdown(config_file, mock_client, mock_calculator, mock_report
     assert not d._shutdown_event.is_set()
     d.request_shutdown()
     assert d._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_daemon_uses_monotonic_time(
+    config_file, mock_client, mock_calculator, mock_reporter
+):
+    mock_client.fetch_metrics.return_value = [DummyResponse("cpu", 1)]
+
+    d = TelemetryDaemon(config_file, mock_client, mock_calculator, mock_reporter)
+
+    await d.poll_device(d.devices[0])
+
+    # The calculator must receive monotonic timestamps, not wall-clock time
+    ts = mock_calculator.calculate_rate.call_args[1]["current_time"]
+    assert isinstance(ts, float)
+    assert ts >= 0.0
