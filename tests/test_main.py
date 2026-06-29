@@ -76,7 +76,7 @@ async def test_main_starts_daemon_with_default_json(tmp_path, monkeypatch):
     started = False
 
     class DummyDaemon:
-        def __init__(self, cfg, reporter):
+        def __init__(self, cfg, reporter, **kwargs):
             assert cfg == config
 
         async def start(self):
@@ -113,7 +113,7 @@ async def test_main_prometheus_starts_server(tmp_path, monkeypatch):
             server_started = True
 
     class DummyDaemon:
-        def __init__(self, cfg, reporter):
+        def __init__(self, cfg, reporter, **kwargs):
             assert cfg == config
 
         async def start(self):
@@ -198,7 +198,7 @@ async def test_main_selects_csv(tmp_path, monkeypatch):
             created = True
 
     class DummyDaemon:
-        def __init__(self, cfg, reporter):
+        def __init__(self, cfg, reporter, **kwargs):
             assert created is True
 
         async def start(self):

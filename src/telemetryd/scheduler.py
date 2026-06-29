@@ -5,6 +5,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+from telemetryd.ext.health import HealthServer
 from telemetryd.metrics import RateCalculator, SNMPResponse
 from telemetryd.snmp import AsyncSNMPClient
 
@@ -44,6 +45,7 @@ class TelemetryDaemon:
         client: AsyncSNMPClient | None = None,
         calculator: RateCalculator | None = None,
         reporter: TelemetryReporter | None = None,
+        health_server: HealthServer | None = None,
     ) -> None:
         self.config: ProgramConfig = self._load_config(config_path)
         self.interval: float = self.config.get("polling_interval_seconds", 5.0)
@@ -52,6 +54,7 @@ class TelemetryDaemon:
         self.client = client or AsyncSNMPClient()
         self.calculator = calculator or RateCalculator()
         self.reporter = reporter or TelemetryReporter(logging.getLogger(__name__))
+        self.health_server = health_server or HealthServer()
 
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -75,6 +78,9 @@ class TelemetryDaemon:
             responses = await self.client.fetch_metrics(
                 host, port, community, metrics_cfg
             )
+
+            if self.health_server is not None and not self.health_server._ready:
+                self.health_server.mark_ready()
 
             arrival_time = time.monotonic()
 
@@ -138,3 +144,6 @@ class TelemetryDaemon:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         except asyncio.CancelledError:
             pass
+        finally:
+            if self.health_server is not None:
+                await self.health_server.stop()

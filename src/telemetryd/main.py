@@ -1,10 +1,12 @@
 import argparse
 import asyncio
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 from telemetryd.ext.csv_reporter import CSVReporter
+from telemetryd.ext.health import HealthServer
 from telemetryd.ext.json_reporter import JSONReporter
 from telemetryd.ext.prometheus_exporter import PrometheusTextExporter
 from telemetryd.scheduler import TelemetryDaemon
@@ -90,7 +92,12 @@ async def main() -> None:
         await reporter.start_server()
 
     logger.info("Initializing TelemetryDaemon")
-    daemon = TelemetryDaemon(config_file, reporter=reporter)
+    health = HealthServer(port=8081)
+    daemon = TelemetryDaemon(config_file, reporter=reporter, health_server=health)
+
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        logger.info("Starting health endpoint on port 8081")
+        await health.start()
 
     logger.info("Starting TelemetryDaemon polling loop")
     await daemon.start()
