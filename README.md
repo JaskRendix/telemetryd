@@ -185,3 +185,13 @@ Writes CSV rows to `logs/telemetry.csv`.
 
 **PrometheusTextExporter**  
 Provides a `/metrics` HTTP endpoint on port 9100 in Prometheus text format, exposing raw counter values, per‑second rates, and timestamps for scraping.
+
+---
+
+### HTTP health endpoint
+Telemetryd includes a small HTTP listener that exposes two routes:
+
+- `/health` — returns `200 OK`
+- `/ready` — returns `200 OK` after the first successful poll, otherwise `503 Service Unavailable`
+
+The listener runs on port `8081` and uses a minimal TCP server. It provides basic liveness and readiness signals for process supervisors and orchestration systems.
