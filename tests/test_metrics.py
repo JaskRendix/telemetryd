@@ -178,3 +178,150 @@ def test_history_lru_updates_on_access():
     assert "oid1" not in calc._history["h"]
     assert "oid0" in calc._history["h"]
     assert "oidX" in calc._history["h"]
+
+
+@pytest.mark.parametrize(
+    "snmp_type,max_val",
+    [
+        ("COUNTER32", 2**32),
+        ("COUNTER64", 2**64),
+    ],
+)
+def test_high_traffic_wrap_not_reset(snmp_type, max_val):
+    calc = RateCalculator()
+    t0 = 1000.0
+    t1 = 1005.0  # long window
+
+    before = max_val - 100
+    after = 200  # small current value but legitimate wrap
+
+    calc.calculate_rate("h", resp("x", before, snmp_type), now=t0)
+
+    # Simulate huge traffic: adjusted_delta ≈ max_val - before + after
+    rate = calc.calculate_rate("h", resp("x", after, snmp_type), now=t1)
+
+    expected = (after - before + max_val) / (t1 - t0)
+    assert rate == round(expected, 2)
+
+
+def test_true_reset_detected():
+    calc = RateCalculator()
+    t0 = 1000.0
+    t1 = 1001.0
+
+    calc.calculate_rate("h", resp("r", 3_000_000_000), now=t0)
+    rate = calc.calculate_rate("h", resp("r", 10), now=t1)
+
+    assert rate is not None
+    assert rate >= 0.0
+
+
+def test_invalid_timestamp_does_not_overwrite_history():
+    calc = RateCalculator()
+    t0 = 1000.0
+
+    calc.calculate_rate("h", resp("x", 100), now=t0)
+
+    # Invalid timestamp (same time)
+    rate = calc.calculate_rate("h", resp("x", 200), now=t0)
+    assert rate == 0.0
+
+    # Now a valid timestamp → must compute correct delta
+    rate2 = calc.calculate_rate("h", resp("x", 300), now=t0 + 10)
+    assert rate2 == 20.0
+
+
+def test_counter_alias_normalization():
+    calc = RateCalculator()
+    t0 = 1000.0
+    t1 = 1002.0
+
+    calc.calculate_rate("h", resp("c", 100, "COUNTER"), now=t0)
+    rate = calc.calculate_rate("h", resp("c", 200, "COUNTER"), now=t1)
+
+    assert rate == 50.0
+
+
+def test_physical_rate_sanity_limit():
+    calc = RateCalculator()
+    calc.MAX_REASONABLE_RATE = 100.0
+
+    t0 = 1000.0
+    t1 = 1001.0
+
+    calc.calculate_rate("h", resp("p", 0), now=t0)
+    rate = calc.calculate_rate("h", resp("p", 1000), now=t1)
+
+    assert rate is None
+
+
+def test_mixed_timestamp_sources_do_not_corrupt_history():
+    calc = RateCalculator()
+
+    # First sample uses monotonic fallback
+    r1 = calc.calculate_rate("h", resp("m", 100))
+    assert r1 is None
+
+    # Second sample uses explicit wall-clock time
+    r2 = calc.calculate_rate("h", resp("m", 200), current_time=1000.0)
+    assert r2 >= 0.0 or r2 is None  # must not crash or poison history
+
+
+def test_wrap_with_large_delta_time():
+    calc = RateCalculator()
+    t0 = 1000.0
+    t1 = 2000.0  # long window
+
+    max_val = 2**32
+    before = max_val - 5
+    after = 10
+
+    calc.calculate_rate("h", resp("w", before), now=t0)
+    rate = calc.calculate_rate("h", resp("w", after), now=t1)
+
+    expected = (after - before + max_val) / (t1 - t0)
+    assert rate == round(expected, 2)
+
+
+def test_no_reset_when_current_value_large():
+    calc = RateCalculator()
+    t0 = 1000.0
+    t1 = 1001.0
+
+    max_val = 2**32
+    calc.calculate_rate("h", resp("nr", max_val - 50), now=t0)
+
+    # current_value is large → not a reset
+    rate = calc.calculate_rate("h", resp("nr", 1000), now=t1)
+
+    assert rate is not None
+
+
+def test_multiple_wraps_sequence():
+    calc = RateCalculator()
+    t = 1000.0
+
+    max_val = 2**32
+
+    # First wrap
+    calc.calculate_rate("h", resp("mw", max_val - 10), now=t)
+    r1 = calc.calculate_rate("h", resp("mw", 20), now=t + 1)
+    assert r1 == round((20 - (max_val - 10) + max_val) / 1, 2)
+
+    # Second wrap
+    r2 = calc.calculate_rate("h", resp("mw", 30), now=t + 2)
+    assert r2 == 10.0
+
+
+def test_history_preserved_on_invalid_sample():
+    calc = RateCalculator()
+    t0 = 1000.0
+
+    calc.calculate_rate("h", resp("x", 100), now=t0)
+
+    # Invalid sample (same timestamp)
+    calc.calculate_rate("h", resp("x", 500), now=t0)
+
+    # Valid sample must compute delta from original 100
+    rate = calc.calculate_rate("h", resp("x", 600), now=t0 + 10)
+    assert rate == 50.0
