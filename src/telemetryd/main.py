@@ -9,10 +9,13 @@ from telemetryd.ext.json_reporter import JSONReporter
 from telemetryd.ext.prometheus_exporter import PrometheusTextExporter
 from telemetryd.scheduler import TelemetryDaemon
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("telemetryd")
 
 ReporterFactory = Callable[[], object]
-
 
 REPORTERS: dict[str, ReporterFactory] = {
     "json": lambda: JSONReporter("logs/telemetry.jsonl"),
@@ -72,16 +75,24 @@ async def main() -> None:
 
     args = parser.parse_args()
 
+    logger.info(f"Selected reporter: {args.reporter}")
+    logger.info(f"Loading configuration from: {args.config}")
+
     config_file = Path(args.config)
     if not config_file.exists():
+        logger.error(f"Configuration file not found: {config_file}")
         raise FileNotFoundError(f"Configuration file not found: {config_file}")
 
     reporter = build_reporter(args.reporter)
 
     if isinstance(reporter, PrometheusTextExporter):
+        logger.info("Starting Prometheus exporter on port 9100")
         await reporter.start_server()
 
+    logger.info("Initializing TelemetryDaemon")
     daemon = TelemetryDaemon(config_file, reporter=reporter)
+
+    logger.info("Starting TelemetryDaemon polling loop")
     await daemon.start()
 
 
@@ -89,4 +100,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nDaemon terminated.")
+        logger.info("Daemon terminated by user")
