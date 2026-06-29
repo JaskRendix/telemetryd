@@ -1,8 +1,11 @@
 import json
+import logging
 import time
 from pathlib import Path
 
 from telemetryd.metrics import SNMPResponse
+
+logger = logging.getLogger(__name__)
 
 
 class JSONReporter:
@@ -17,6 +20,7 @@ class JSONReporter:
 
         # Open file in append mode
         self._fh = self._path.open("a", encoding="utf-8")
+        logger.info(f"JSONReporter initialized at {self._path}")
 
     def _write(self, payload: dict) -> None:
         json.dump(payload, self._fh)
@@ -24,6 +28,7 @@ class JSONReporter:
         self._fh.flush()
 
     def startup(self, device_count: int, interval: float) -> None:
+        logger.info(f"Startup event: {device_count} devices, interval={interval}s")
         self._write(
             {
                 "event": "startup",
@@ -61,6 +66,7 @@ class JSONReporter:
         )
 
     def error(self, host: str, exc: Exception) -> None:
+        logger.error(f"Error event for {host}: {exc}")
         self._write(
             {
                 "event": "error",
@@ -71,4 +77,14 @@ class JSONReporter:
         )
 
     def close(self) -> None:
-        self._fh.close()
+        try:
+            self._fh.close()
+            logger.info("JSONReporter file handle closed")
+        except Exception as e:
+            logger.error(f"Failed to close JSONReporter file handle: {e}")
+
+    def __del__(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
